@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>센서 에뮬레이터</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #e7eef2;
+        --ink: #172028;
+        --muted: #5d6b76;
+        --line: #d5e0e6;
+        --card: #f8fbfc;
+        --teal: #0f6e73;
+        --clay: #9a4630;
+        font-family: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; }
+      button, input { font: inherit; color: inherit; }
+      button { cursor: pointer; }
+      h1, h2, p { margin: 0; }
+      .page { width: min(980px, calc(100% - 32px)); margin: 0 auto; padding: 36px 0 72px; }
+      .eyebrow { color: var(--teal); font-size: 12px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; }
+      h1 { margin-top: 6px; font-size: clamp(32px, 5vw, 48px); letter-spacing: -0.045em; }
+      .lede { max-width: 40rem; margin-top: 10px; color: var(--muted); line-height: 1.5; }
+      .toolbar, .house, .status {
+        margin-top: 18px;
+        padding: 16px;
+        border-radius: 20px;
+        background: var(--card);
+        border: 1px solid white;
+      }
+      .toolbar, .house-head, .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      .toolbar { justify-content: space-between; }
+      label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
+      input[type="number"] {
+        width: 120px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+      }
+      .primary, .ghost {
+        border: 0;
+        border-radius: 999px;
+        padding: 11px 16px;
+      }
+      .primary { background: var(--teal); color: white; }
+      .ghost { background: transparent; border: 1px solid var(--line); }
+      .primary:disabled { opacity: 0.6; }
+      .check { flex-direction: row; align-items: center; color: var(--ink); }
+      .houses { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+      .house h2 { font-size: 22px; letter-spacing: -0.04em; }
+      .fields { display: flex; gap: 10px; flex-wrap: wrap; }
+      .status { color: var(--muted); }
+      .error { color: var(--clay); }
+      .empty { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <p class="eyebrow">Sensor emulator</p>
+      <h1>센서 에뮬레이터</h1>
+      <p class="lede">
+        온실 목록은 장부에서 가져옵니다. 동을 추가하거나 삭제하면 여기 센서도 같이 바뀝니다. 값을 바꾼 뒤 장부로 보냅니다.
+      </p>
+
+      <section class="toolbar">
+        <div class="actions">
+          <button type="button" class="primary" id="send">지금 전송</button>
+          <button type="button" class="ghost" id="refresh">온실 목록 새로고침</button>
+        </div>
+        <div class="actions">
+          <label class="check">
+            <input type="checkbox" id="auto" />
+            자동 전송
+          </label>
+          <label>
+            간격(초)
+            <input type="number" id="interval" min="2" max="120" step="1" value="5" />
+          </label>
+        </div>
+      </section>
+
+      <section class="houses" id="houses" aria-live="polite"></section>
+      <p class="status" id="status">장부에서 온실을 불러오는 중입니다.</p>
+    </main>
+    <script>
+      const housesEl = document.querySelector("#houses");
+      const statusEl = document.querySelector("#status");
+      const autoEl = document.querySelector("#auto");
+      const intervalEl = document.querySelector("#interval");
+      const sendEl = document.querySelector("#send");
+      let applying = false;
+
+      function statusText(state) {
+        const sent = state.lastSentAt ? `마지막 전송 ${state.lastSentAt.replace("T", " ").slice(0, 19)}` : "아직 전송하지 않았습니다.";
+        const problem = state.lastError ? ` · ${state.lastError}` : "";
+        return `${sent}${problem} · 장부 ${state.ledgerUrl}`;
+      }
+
+      function render(state) {
+        applying = true;
+        const focused = document.activeElement;
+        const focusKey = focused && focused.dataset ? focused.dataset.key : "";
+        const existing = new Map([...housesEl.querySelectorAll(".house")].map((row) => [row.dataset.id, row]));
+        const nextIds = new Set(state.houses.map((house) => String(house.id)));
+        for (const [id, row] of existing) {
+          if (!nextIds.has(id)) row.remove();
+        }
+        if (state.houses.length === 0) {
+          housesEl.innerHTML = '<p class="empty">장부에 등록된 온실이 없습니다. 온실을 추가하면 센서가 생깁니다.</p>';
+        } else if (housesEl.querySelector(".empty")) {
+          housesEl.innerHTML = "";
+        }
+        for (const house of state.houses) {
+          let row = existing.get(String(house.id));
+          if (!row) {
+            row = document.createElement("article");
+            row.className = "house";
+            row.dataset.id = String(house.id);
+            row.innerHTML = `
+              <div class="house-head"><h2></h2></div>
+              <div class="fields">
+                <label>온도 °C <input data-field="temperature" type="number" min="-20" max="60" step="0.1" /></label>
+                <label>습도 % <input data-field="humidity" type="number" min="0" max="100" step="1" /></label>
+                <label>광 lx <input data-field="light" type="number" min="0" max="200000" step="100" /></label>
+              </div>`;
+            housesEl.append(row);
+          }
+          row.querySelector("h2").textContent = house.name;
+          for (const input of row.querySelectorAll("input")) {
+            const key = `${house.id}:${input.dataset.field}`;
+            input.dataset.key = key;
+            if (focusKey !== key) input.value = house[input.dataset.field];
+          }
+        }
+        if (document.activeElement !== autoEl) autoEl.checked = state.auto.enabled;
+        if (document.activeElement !== intervalEl) intervalEl.value = state.auto.intervalSeconds;
+        statusEl.textContent = statusText(state);
+        statusEl.className = state.lastError ? "status error" : "status";
+        applying = false;
+      }
+
+      async function readState() {
+        const response = await fetch("/api/state", { cache: "no-store" });
+        if (!response.ok) throw new Error("상태를 불러오지 못했습니다.");
+        return response.json();
+      }
+
+      async function refresh() {
+        try {
+          render(await readState());
+        } catch (error) {
+          statusEl.textContent = error instanceof Error ? error.message : "상태를 불러오지 못했습니다.";
+          statusEl.className = "status error";
+        }
+      }
+
+      housesEl.addEventListener("change", async (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || applying) return;
+        const row = input.closest(".house");
+        const temperature = Number(row.querySelector('[data-field="temperature"]').value);
+        const humidity = Number(row.querySelector('[data-field="humidity"]').value);
+        const light = Number(row.querySelector('[data-field="light"]').value);
+        const response = await fetch(`/api/houses/${row.dataset.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ temperature, humidity, light }),
+        });
+        if (response.ok) render(await response.json());
+        else statusEl.textContent = "값을 저장하지 못했습니다.";
+      });
+
+      async function saveAuto() {
+        if (applying) return;
+        const response = await fetch("/api/auto", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: autoEl.checked, intervalSeconds: Number(intervalEl.value) }),
+        });
+        if (response.ok) render(await response.json());
+      }
+
+      autoEl.addEventListener("change", saveAuto);
+      intervalEl.addEventListener("change", saveAuto);
+      document.querySelector("#refresh").addEventListener("click", refresh);
+      sendEl.addEventListener("click", async () => {
+        sendEl.disabled = true;
+        try {
+          const response = await fetch("/api/send", { method: "POST" });
+          if (!response.ok) throw new Error("전송하지 못했습니다.");
+          render(await response.json());
+        } catch (error) {
+          statusEl.textContent = error instanceof Error ? error.message : "전송하지 못했습니다.";
+          statusEl.className = "status error";
+        } finally {
+          sendEl.disabled = false;
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 3000);
+    </script>
+  </body>
+</html>
